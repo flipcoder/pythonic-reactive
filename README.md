@@ -1,4 +1,4 @@
-## Reactive Classes
+## Pythonic-Reactive
 
 This python module contains the reactive programming components I developed as
 part of my qork game engine project, and now they're separated here into their own module.
