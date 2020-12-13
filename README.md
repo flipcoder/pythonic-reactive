@@ -5,6 +5,9 @@ part of my qork game engine project, and now they're separated here into their o
 
 Be aware that the test coverage is incomplete and many features are not documented.
 
+It is not suitable for use right now, unless you intend to continue its development
+with me!
+
 ### Signal
 
 ```
