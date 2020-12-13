@@ -1,5 +1,10 @@
 ## Reactive Classes
 
+This python module contains the reactive programming components I developed as
+part of my qork game engine project, and now they're separated here into their own module.
+
+Be aware that the test coverage is incomplete and many features are not documented.
+
 ### Signal
 
 ```
