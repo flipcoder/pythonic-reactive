@@ -2,13 +2,10 @@
 
 from copy import copy
 from .signal import *
-import glm
 import enum
 import traceback
 
-class Dummy:
-    pass
-DUMMY = Dummy()
+class DUMMY: pass # placeholder
 
 def weakmethod(func):
     """
@@ -99,10 +96,9 @@ class TrackMe:
     #     print('set:', val)
     #     self.value = val
     def __call__(self, val=DUMMY):
-        if val is DUMMY:
+        if val is DUMMY: # accessor
             return self.value
-        else:
-            print("trackme call")
+        else: # mutator
             traceback.print_stack()
             self.value = val
 
@@ -260,9 +256,11 @@ class ReactiveVector(Reactive):
     Reactive Vector 3
     """
 
-    def __init__(self, value=None, callbacks=[], observe=[], Type=glm.vec3):
+    Type = None
+
+    def __init__(self, value=None, callbacks=[], observe=[]):
         super().__init__(value, callbacks, observe)
-        self.Type = Type
+        assert Type is not None # set an underlying type!
         self.value = Type()
         # TODO: generate swizzle props?
 
@@ -330,9 +328,11 @@ class ReactiveColor(Rvec):
     Reactive Color
     """
 
-    def __init__(self, value=None, callbacks=[], Type=glm.vec4):
+    Type = None
+
+    def __init__(self, value=None, callbacks=[]):
         super().__init__(value, callbacks)
-        self.Type = Type
+        assert Type is not None # set an underlying type!
         self.value = Type()
         # generate swizzle props?
 
@@ -494,18 +494,18 @@ def callbacks(*callbacks):
     return observe_decorator
 
 
-def lazy(*deps, **kwargs):
-    def lazy_decorator(func):
+def lazy_method(*deps, **kwargs):
+    def lazy_decorator_func(func):
         return Lazy(
             func,
             observe=deps or kwargs.get("observe", []),
             callbacks=deps or kwargs.get("callbacks", []),
         )
 
-    return lazy_decorator
+    return lazy_decorator_func
 
 
-def reactive(*args, **kwargs):
+def reactive_decorator(*args, **kwargs):
     """
     INCOMPLETE
     
@@ -536,7 +536,7 @@ def reactive(*args, **kwargs):
     # observe arguments unless a function is given (this means no decorator params)
     obs = args if args and not callable(args[0]) else []
 
-    def reactive_decorator(func):
+    def reactive_method_decorator(func):
         return Reactive(
             func,
             observe=obs or kwargs.get("observe", []),
@@ -548,3 +548,6 @@ def reactive(*args, **kwargs):
         return lazy_decorator(func)
 
     return lazy_decorator
+
+reactive_class = reactive_decorator
+reactive_method = reactive_decorator
