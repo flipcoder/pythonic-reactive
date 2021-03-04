@@ -55,14 +55,34 @@ class Connections:
 
 
 class Slot:
-    def __init__(self, func, sig, name=""):
+    def __init__(self, func, sig, name=None, tags=None):
         self.name = name
         self.func = func
         self.sig = weakref.ref(sig)
         self.once = False
         self.count = 0
         self.dead = False
+        self.blocked = 0  # 0 = enabled, >=1 = disabled
+        if tags is not None:
+            if type(tags) is set:
+                self.tags = tags
+            else:
+                self.tags = set(tags)
+        else:
+            self.tags = None
         self.on_remove = Signal()
+
+    def block(self):
+        self.blocked += 1
+
+    def unblock(self):
+        self.blocked = max(0, self.blocked - 1)
+
+    def enable(self):
+        self.blocked = 0
+
+    def disable(self):
+        self.blocked = 1
 
     def __call__(self, *args, **kwargs):
         if self.dead:
@@ -107,15 +127,44 @@ class Slot:
         self.dead = True
 
 
-class Queued:
-    pass
+# class Queued:
+#     pass
 
+class TaskQueue:
+    def __init__(self):
+        self._queued = [[], []] # ping-pong queues
+        self._current_queue = False # bool index for ping-pong task queue
+    def __iadd__(self, cb):
+        self.add(cb)
+        return self
+    def add(self, cb):
+        self._queued[self._current_queue].append(cb)
+    def clear(self):
+        self._queued = [[], []] # ping-pong queues
+    def __len__(self):
+        return len(self._queued[0]) + len(self._queued[1])
+    def __call__(self):
+        i = False
+        count = 0
+        while True:
+            if self._queued[i]:
+                self._current_queue = not i
+                for func in self._queued[i]:
+                    func()
+                    count += 1
+                self._queued[i] = []
+            else:
+                break
+            i = not i  # ping pong
 
-def passthrough(*args):
-    return args[0] if args else None
-
+        assert not self._queued[0]
+        assert not self._queued[1]
+        self._current_queue = False
+        return count
 
 def queued(func):
+    """Returns a decorator that wraps a container function
+    for iteration safety."""
     def queued_decorator(self, *args, **kwargs):
         if self._blocked:
             self.queue(lambda a=args, kw=kwargs: func(self, *a, **kw))
@@ -138,12 +187,15 @@ def queued(func):
 
 
 class Container:
+    TASK_QUEUE = None
+    
     def __init__(
-        self, adapter=None, Storage=list, Element=None, reactive=False, *args, **kwargs
+        self, adapter=None, Storage=list, Element=None, reactive=False, taskqueue=None, *args, **kwargs
     ):
         """
         A safely-iterable container where all operations during iterations
-        are queued and processed after.
+        are queued and processed after, either in the container queue or
+        forwarded to the provided task queue.
         Similar to signal, but does not support slot weakrefs.
         """
 
@@ -154,25 +206,51 @@ class Container:
         self._current_queue = 0
         self._queued = [[], []]  # two ping-pong queues
         self.adapter = adapter
+        if Container.TASK_QUEUE is not None:
+            self.taskqueue = Container.TASK_QUEUE # another "global" task queue to use instead
+        else:
+            self.taskqueue = taskqueue # another "global" task queue to use instead
 
         if reactive:
             self.on_change = self.on_pend = Signal()
 
+    def block(self):
+        self._blocked += 1
+
+    def unblock(self):
+        self._blocked -= 1
+
+    @property
+    def blocked(self):
+        return self._blocked
+
     def queue_size(self):
+        """Returns the size of the internal callback queues"""
         return len(self._queued[0]) + len(self._queued[1])
 
     def queue(self, func):
-        if self._blocked:
-            self._queued[self._current_queue].append(func)
+        """Call a callback if safe or add it to the task queue
+        or the container queue. Returns True if the call was
+        queued."""
+        if self.blocked:
+            if self.taskqueue is not None:
+                self.taskqueue += func
+            else:
+                self._queued[self._current_queue].append(func)
             return True
-        func()
+        else:
+            func()
         return False
 
     def safe_call(self, cb):
-        if self._blocked:
-            self._queued[self._current_queue].append(
-                lambda slot=slot: self.connect(slot, weak, cb=cb)
-            )
+        """Call a callback if safe or add it to the task queue
+        or the container queue. Returns callback func return
+        value or None if queued."""
+        if self.blocked:
+            if self.taskqueue is not None:
+                self.taskqueue += func
+            else:
+                self._queued[self._current_queue].append(cb)
             return None
         else:
             return cb()
@@ -186,12 +264,12 @@ class Container:
         """
 
         def do_decorator(func):
-            if self._blocked:
-                self._queued[self._current_queue].append(lambda: func(self, *args))
+            if self.blocked:
+                self.queue(lambda: func(self, *args))
                 return
-            self._blocked += 1
+            self.block()
             func()
-            self._blocked -= 1
+            self.unblock()
             self.refresh()
 
         return do_decorator
@@ -238,6 +316,8 @@ class Container:
         self -= slot
 
     def refresh(self):
+        if self.taskqueue:
+            return False
         if self._blocked == 0:
             # self._blocked += 1
             self._current_queue += 1
@@ -280,20 +360,20 @@ class Container:
     def __bool__(self):
         return bool(self._slots)
 
-    def connect(self, func, once=False, cb=None, name=""):
+    def connect(self, func, once=False, cb=None, name="", tags=None):
 
         if isinstance(func, (list, tuple)):
             r = []
             for f in func:
-                r.append(self.connect(f, once, cb))
+                r.append(self.connect(f, once, cb, name, tags))
             return r
 
-        if self._blocked:
+        if self.blocked:
             # if we're blocked, then queue the call
             if isinstance(func, Slot):
                 slot = func
             else:
-                slot = Slot(func, self, name=name)
+                slot = Slot(func, self, name=name, tags=tags)
             slot.once = once
             # wslot = weakref.ref(slot) if weak else slot
             # self._queued.append(lambda wslot=wslot: self._slots.append(wslot))
@@ -305,13 +385,15 @@ class Container:
         if isinstance(func, Slot):
             slot = func  # already a slot
             slot.once = once
+            slot.name = name
+            slot.tags = tags
             self._slots.append(slot)
             if cb:
                 self.safe_call(lambda slot=slot: cb(slot))
             return slot
 
         # make slot from func
-        slot = Slot(func, self, name=name)
+        slot = Slot(func, self, name=name, tags=tags)
         slot.once = once
         # wslot = weakref.ref(slot) if weak else slot
         self._slots.append(slot)
@@ -346,8 +428,9 @@ class Container:
                 if func is value:
                     del self._slots[i]
                     return True, cb, i
-                else:
-                    print(func, value)
+                # else:
+                #     pass
+                    # print(func, value)
 
         return False, None, None
 
@@ -361,6 +444,12 @@ class Container:
     def filter(self, func):
         for slot in self._slots:
             if func(slot.get()):
+                slot.disconnect()
+
+    @queued
+    def filter_slot(self, func):
+        for slot in self._slots:
+            if func(slot):
                 slot.disconnect()
 
     @queued
@@ -379,15 +468,15 @@ class Container:
         return self
 
     def __del__(self):
-        assert not self._blocked
+        # assert not self._blocked
         self.clear()
 
     def __enter__(self):
-        self._blocked += 1
+        self.block()
 
     def __exit__(self, typ, val, tb):
-        self._blocked -= 1
-        if self._blocked == 0:
+        self.unblock()
+        if self.blocked == 0:
             self.refresh()
 
     def __contains__(self, element):
@@ -408,36 +497,122 @@ class Container:
 
     @queued
     def pop(self):
-        e = self.slots[-1]
+        try:
+            e = self._slots[-1]
+        except IndexError:
+            return None
         self._slots = self._slots[:-1]
         self.on_pend()
         return e
 
     def top(self):
-        return self._slots[-1]
+        try:
+            return self._slots[-1]
+        except IndexError:
+            return None
+
+    def clear_tag(self, tag):
+        self.clear_tags({tag})
+
+    def clear_tags(self, tags):
+        self.filter_slot(lambda slot, tags=tags: bool((slot.tags or set()) & tags))
+
+    def clear_name(self, name):
+        self.filter_slot(lambda slot: slot.name == name)
+
+    def clear_type(self, Type):
+        if self._blocked:
+            self.queue(self.clear_type)
+            return None
+
+        with self:
+            for slot in self._slots:
+                # TODO: what about weakrefs?
+                if isinstance(slot.get(), Type):
+                    slot.disconnect()
+
+    def filter(self, func):
+        if self._blocked:
+            self.queue(lambda f=func: self.filter(func))
+            return None  # return promise?
+
+        with self:
+            for slot in self._slots:
+                if func(slot.get()):
+                    slot.disconnect()
+
+    def find(self, func):
+        for ch in self._slots:
+            if func(ch):
+                return ch
+        return None
+
+    def block_tag(self, tag):
+        return self.block_tags({tag})
+
+    def unblock_tag(self, tag):
+        return self.unblock_tags({tag})
+
+    def enable_tag(self, tag):
+        return self.enable_tags({tag})
+
+    def disable_tag(self, tag):
+        return self.disable_tags({tag})
+
+    @queued
+    def block_tags(self, tags):
+        assert tags
+        for s in self._slots:
+            if s.tags is not None and (s.tags & tags) == tags:
+                s.block()
+
+    @queued
+    def unblock_tags(self, tags):
+        assert tags
+        for s in self._slots:
+            if s.tags is not None and (s.tags & tags) == tags:
+                s.unblock()
+
+    @queued
+    def enable_tags(self, tags):
+        assert tags
+        for s in self._slots:
+            if s.tags is not None and (s.tags & tags) == tags:
+                s.enable()
+
+    @queued
+    def disable_tags(self, tags):
+        assert tags
+        for s in self._slots:
+            if s.tags is not None and (s.tags & tags) == tags:
+                s.disable()
 
 
 class Signal(Container):
+    @staticmethod
+    def _passthrough(*args):
+        return args[0] if args else None
+    
     def __init__(self, simple=False, T=Slot, *args, **kwargs):
         super().__init__(*args, Element=T, **kwargs)
-        self.on_connect = passthrough if simple else Signal(simple=True)
+        self.on_connect = Signal._passthrough if simple else Signal(simple=True)
 
     def __call__(self, *args, **kwargs):
         with self:
             for slot in self._slots:
-                if isinstance(slot, weakref.ref):
+                if type(slot) is weakref.ref:
                     wref = slot
                     slot = wref()
                     if not slot:
                         self.disconnect(wref)  # we're blocked, so this will queue
                         continue
-                if slot is not None and not slot.dead:
+                if slot is not None and not slot.dead and slot.blocked == 0:
                     slot(*args)
 
     def refresh(self):
         if self._blocked == 0:
             for wref in self._slots:
-                if isinstance(wref, weakref.ref):
+                if type(wref) is weakref.ref:
                     slot = wref()
                     if not slot:
                         self.disconnect(wref)
@@ -447,7 +622,7 @@ class Signal(Container):
     @queued
     def each(self, func, *args):
         for s in self._slots:
-            if isinstance(s, weakref.ref):
+            if type(s) is weakref.ref:
                 wref = s
                 s = wref()
                 if not func:
@@ -458,7 +633,7 @@ class Signal(Container):
     @queued
     def each_slot(self, func, *args):
         for s in self._slots:
-            if isinstance(s, weakref.ref):
+            if type(s) is weakref.ref:
                 s = s()
                 if not s:
                     continue
@@ -490,20 +665,26 @@ class Signal(Container):
         return (x.get() for x in self.iterslots())
 
     def safe_call(self, cb):
-        if self._blocked:
-            self._queued[self._current_queue].append(
-                lambda slot=slot: self.connect(slot, weak, cb=cb)
-            )
+        if self.blocked:
+            # self._queued[self._current_queue].append(
+            #     lambda slot=slot: self.connect(slot, weak, cb=cb)
+            # )
+            if self.taskqueue is not None:
+                self.taskqueue += cb
+            else:
+                self._queued[self._current_queue].append(cb)
             return None
         else:
             return cb()
 
-    def connect(self, func, weak=True, once=False, cb=None, on_remove=None, name=""):
+    def connect(
+        self, func, weak=True, once=False, cb=None, on_remove=None, name="", tags=None
+    ):
 
         if isinstance(func, (list, tuple)):
             r = []
             for f in func:
-                r.append(self.connect(f, weak, once, cb, on_remove, name))
+                r.append(self.connect(f, weak, once, cb, on_remove, name, tags))
             return r
 
         if self._blocked:
@@ -514,9 +695,10 @@ class Signal(Container):
                 slot = self.Element(self, self._adapt(func))
             slot.once = once
             # wslot = weakref.ref(slot) if weak else slot
-            self._queued[self._current_queue].append(
-                lambda slot=slot: self.connect(slot, weak, cb=cb)
-            )
+            self.queue(lambda slot=slot: self.connect(slot, weak, cb, on_remove, name, tags))
+            # self._queued[self._current_queue].append(
+            #     lambda slot=slot: self.connect(slot, weak, cb, on_remove, name, tags)
+            # )
             if on_remove:
                 slot.on_remove.connect(on_remove, weak=False)
             return slot
@@ -535,7 +717,7 @@ class Signal(Container):
             return slot
 
         # make slot from func
-        slot = self.Element(self._adapt(func), self)
+        slot = self.Element(self._adapt(func), self, name=name, tags=tags)
         slot.once = once
         wslot = weakref.ref(slot) if weak else slot
         self._slots.append(wslot)
@@ -546,14 +728,21 @@ class Signal(Container):
             self.safe_call(cb)
         return slot
 
-    def store(self, func, once=False, cb=None, on_remove=None, name=""):
+    def replace(self, func, once=False, cb=None, on_remove=None, name="", tags=None):
+        """
+        Replace all slots with `name` with the provided slot
+        """
+        self.clear_name(name)
+        return self.connect(func, False, once, cb, on_remove, name, tags)
+
+    def store(self, func, once=False, cb=None, on_remove=None, name="", tags=None):
         """
         Equivalent to +=, connects but stores slot instead of a weakref
         """
-        return self.connect(func, False, once, cb, on_remove, name)
+        return self.connect(func, False, once, cb, on_remove, name, tags)
 
-    def once(self, func, weak=True):
-        return self.connect(func, weak, once=True)
+    def once(self, func, weak=True, name="", tags=None):
+        return self.connect(func, weak, once=True, name=name, tags=tags)
 
     def disconnect(self, slot, cb=None):
 
@@ -564,7 +753,7 @@ class Signal(Container):
         if not self._slots:
             return False
 
-        if isinstance(slot, weakref.ref):
+        if type(slot) is weakref.ref:
             # try to remove weak reference
             wref = slot
             slot = wref()
@@ -586,7 +775,7 @@ class Signal(Container):
             clean_wrefs = False
             for i in range(len(self._slots)):
                 islot = self._slots[i]
-                if isinstance(islot, weakref.ref):
+                if type(islot) is weakref.ref:
                     islot = islot()
                     if not islot:
                         clean_wrefs = True
@@ -611,7 +800,7 @@ class Signal(Container):
             clean_wrefs = False
             for i in range(len(self._slots)):
                 slot = self._slots[i]
-                if isinstance(slot, weakref.ref):
+                if type(slot) is weakref.ref:
                     wref = slot
                     slot = slot()
                     if not slot:
@@ -635,29 +824,3 @@ class Signal(Container):
                         self.safe_call(lambda: cb(i))
                     return True
             return False
-
-    def clear_type(self, Type):
-        if self._blocked:
-            self.queue(self.clear_type)
-            return None
-
-        with self:
-            for slot in self._slots:
-                if isinstance(slot.get(), Type):
-                    slot.disconnect()
-
-    def filter(self, func):
-        if self._blocked:
-            self.queue(lambda f=func: self.filter(func))
-            return None  # return promise?
-
-        with self:
-            for slot in self._slots:
-                if func(slot.get()):
-                    slot.disconnect()
-
-    def find(self, func):
-        for ch in self._slots:
-            if func(ch):
-                return ch
-        return None

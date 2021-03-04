@@ -1,29 +1,42 @@
 #!/usr/bin/env python
 
 from copy import copy
+
+# from .util import *
 from .signal import *
+import glm
 import enum
 import traceback
 
-class DUMMY: pass # placeholder
 
-def weakmethod(func):
-    """
-    Weak Method decorator
-    class A:
-        @weakmethod
-        def test(weakself, *args):
-            pass
-    """
+class Dummy:
+    pass
 
-    def f(weakself, *args, **kwargs):
-        self = weakself()
-        if self:
-            return getattr(self, func.__name__)(*args, **kwargs)
-        # elif throws:
-        #     raise throws
 
-    return f
+DUMMY = Dummy()
+
+try:
+    weakmethod
+except:
+
+    def weakmethod(func):
+        """
+        Weak Method decorator
+        class A:
+            @weakmethod
+            def test(weakself, *args):
+                pass
+        """
+
+        def f(weakself, *args, **kwargs):
+            self = weakself()
+            if self:
+                return getattr(self, func.__name__)(*args, **kwargs)
+            # elif throws:
+            #     raise throws
+
+        return f
+
 
 """
 Reactive and Lazy objects and decorators using signals:
@@ -60,12 +73,11 @@ class WeakLambda:
 
     # Error = enum.Enum('WeakLambda.Error', 'Dereference')
 
-    def __init__(self, capture, func):  # , errors=False):
+    def __init__(self, capture, func, errors=True):
         self.func = func
-        self.dead = False
-        # self.errors = errors
+        self._dead = False
 
-        self.observe = tuple(weakref.ref(var) for var in capture)
+        self.capture = tuple(weakref.ref(var) for var in capture)
 
     def __call__(self, *args):
         if self.func is None:
@@ -74,10 +86,19 @@ class WeakLambda:
         capture = tuple(x() for x in self.capture)
         if None not in capture:
             return self.func(*capture, *args)
-        # if self.errors:
-        #     raise ErrorCode(Error.Dereference)
-        self.dead = True
+        self._dead = True
         return None
+
+    def dead(self):
+        if self._dead:
+            return True
+        if self.func is None:
+            self._dead = True
+            return True
+        capture = tuple(x() for x in self.capture)
+        if None in capture:
+            self._dead = True
+            return True
 
     # def clear():
     #     self.dead = True
@@ -96,9 +117,10 @@ class TrackMe:
     #     print('set:', val)
     #     self.value = val
     def __call__(self, val=DUMMY):
-        if val is DUMMY: # accessor
+        if val is DUMMY:
             return self.value
-        else: # mutator
+        else:
+            print("trackme call")
             traceback.print_stack()
             self.value = val
 
@@ -243,11 +265,11 @@ class Reactive:
 
 class ReactiveProperty(Reactive):
     def __get__(self, inst, owner):
-        print("get")
+        # print("get")
         return self() if inst else self
 
     def __set__(self, inst, val):
-        print("set")
+        # print("set")
         return self(val)
 
 
@@ -256,11 +278,9 @@ class ReactiveVector(Reactive):
     Reactive Vector 3
     """
 
-    Type = None
-
-    def __init__(self, value=None, callbacks=[], observe=[]):
+    def __init__(self, value=None, callbacks=[], observe=[], Type=glm.vec3):
         super().__init__(value, callbacks, observe)
-        assert Type is not None # set an underlying type!
+        self.Type = Type
         self.value = Type()
         # TODO: generate swizzle props?
 
@@ -328,11 +348,9 @@ class ReactiveColor(Rvec):
     Reactive Color
     """
 
-    Type = None
-
-    def __init__(self, value=None, callbacks=[]):
+    def __init__(self, value=None, callbacks=[], Type=glm.vec4):
         super().__init__(value, callbacks)
-        assert Type is not None # set an underlying type!
+        self.Type = Type
         self.value = Type()
         # generate swizzle props?
 
@@ -404,7 +422,8 @@ class Lazy:
         for sig in observe:
             ws = weakref.ref(self)
             self.connections += sig.connect(
-                self.pend, on_remove=lambda s, ws=ws: cls.weak_remove(ws, s),
+                self.pend,
+                on_remove=lambda s, ws=ws: cls.weak_remove(ws, s),
             )
         for func in callbacks:
             try:
@@ -494,21 +513,21 @@ def callbacks(*callbacks):
     return observe_decorator
 
 
-def lazy_method(*deps, **kwargs):
-    def lazy_decorator_func(func):
+def lazy(*deps, **kwargs):
+    def lazy_decorator(func):
         return Lazy(
             func,
             observe=deps or kwargs.get("observe", []),
             callbacks=deps or kwargs.get("callbacks", []),
         )
 
-    return lazy_decorator_func
+    return lazy_decorator
 
 
-def reactive_decorator(*args, **kwargs):
+def reactive(*args, **kwargs):
     """
     INCOMPLETE
-    
+
     Class or Function Decorator
     For classes: Generate props/setters for all the reactive "_members" of the class
     The class must "templatable", meaning a default arg version must contain
@@ -536,7 +555,7 @@ def reactive_decorator(*args, **kwargs):
     # observe arguments unless a function is given (this means no decorator params)
     obs = args if args and not callable(args[0]) else []
 
-    def reactive_method_decorator(func):
+    def reactive_decorator(func):
         return Reactive(
             func,
             observe=obs or kwargs.get("observe", []),
@@ -548,6 +567,3 @@ def reactive_decorator(*args, **kwargs):
         return lazy_decorator(func)
 
     return lazy_decorator
-
-reactive_class = reactive_decorator
-reactive_method = reactive_decorator

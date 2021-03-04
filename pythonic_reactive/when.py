@@ -2,11 +2,9 @@
 import weakref
 
 from .signal import Signal, Slot, Container
+from .defs import *
+# from .util import map_range, Color
 
-EPSILON = 0.0001
-
-def map_range(val, r1, r2):
-    return (val - r1[0]) / (r1[1] - r1[0]) * (r2[1] - r2[0]) + r2[0]
 
 class WhenSlot(Slot):
     def __init__(self, *args, **kwargs):
@@ -18,6 +16,13 @@ class WhenSlot(Slot):
         self.ease = None
         self.speed = 1.0
         self.range = None
+        self.paused = False
+
+    def pause(self, b=True):
+        self.paused = b
+
+    def unpause(self):
+        self.paused = False
 
     def set_speed(self, s):
         self.speed = s
@@ -107,6 +112,9 @@ class When(Signal):
                 self.sig.disconnect(wref)
                 return
 
+        if slot.paused:
+            return
+
         if slot.duration != 0:  # not infinite timer
             slot.remaining -= dt * slot.speed
 
@@ -143,10 +151,11 @@ class When(Signal):
         self.time += dt
         for slot in self.conditions:
             if slot.value[0]():
-                self.value[1]()
-        for slot in self.slots:
-            self.update_slot(slot, dt)
-        self.refresh()
+                slot.value[1]()
+        with self:
+            for slot in self.slots:
+                self.update_slot(slot, dt)
+        # self.refresh()
 
     # def __call__(self, dt):
     #     return self.update(self, dt)
@@ -177,6 +186,14 @@ class When(Signal):
         """
         if duration < EPSILON:
             return None
+
+        # convert strings to Colors (ex. "blue" is Color("blue"))
+        # if range_:
+        #     for i in range(len(range_)):
+        #         colorstring = range_[i]
+        #         if isinstance(colorstring, str):  # string?
+        #             range_[i] = Color(colorstring)  # strings are colors
+
         slot = self.every(0, func, weak=weak)
         slot.duration = slot.remaining = float(duration)
         slot.fade = True
